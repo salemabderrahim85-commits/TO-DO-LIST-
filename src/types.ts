@@ -1,20 +1,13 @@
-export type Priority = 'low' | 'medium' | 'high';
-
-export type Category = 'personal' | 'work' | 'shopping' | 'health' | 'education' | 'other';
-
-export interface Task {
+export interface CalculationHistoryItem {
   id: string;
-  title: string;
-  description?: string;
-  completed: boolean;
-  createdAt: number;
-  completedAt?: number;
-  dueDate?: string; // YYYY-MM-DD
-  dueTime?: string; // HH:MM
-  priority: Priority;
-  category: Category;
+  expression: string;
+  result: string;
+  timestamp: number;
 }
 
-export type FilterStatus = 'all' | 'active' | 'completed';
+export type CalculatorTheme = 'dark' | 'light' | 'amoled';
 
-export type SortBy = 'date_asc' | 'date_desc' | 'priority' | 'alphabetical';
+export interface MemoryState {
+  value: number;
+  hasValue: boolean;
+}

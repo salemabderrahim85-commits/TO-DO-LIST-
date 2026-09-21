@@ -3,393 +3,568 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect, useMemo } from 'react';
-import { Plus, CheckCircle, ListTodo, Sparkles, FilterX } from 'lucide-react';
-import { AnimatePresence, motion } from 'motion/react';
-import { Task, FilterStatus, Category, SortBy } from './types';
-import { loadTasksFromStorage, saveTasksToStorage } from './utils/storage';
-import { playSuccessSound, playTapSound, triggerHaptic } from './utils/soundAndHaptics';
-import { AndroidFrame } from './components/AndroidFrame';
-import { TaskItem } from './components/TaskItem';
-import { TaskModal } from './components/TaskModal';
-import { TaskFilters } from './components/TaskFilters';
-import { TaskStats } from './components/TaskStats';
+import React, { useState, useEffect, useCallback } from 'react';
+import {
+  Calculator as CalcIcon,
+  Moon,
+  Sun,
+  Volume2,
+  VolumeX,
+  Keyboard,
+  RotateCcw,
+  Sparkles,
+} from 'lucide-react';
+import { CalculationHistoryItem, MemoryState } from './types';
+import { evaluateExpression, cleanFloat } from './utils/calculatorEngine';
+import { playKeySound, triggerHaptic } from './utils/soundAndHaptics';
+import { CalculatorDisplay } from './components/CalculatorDisplay';
+import { CalculatorKeypad } from './components/CalculatorKeypad';
+import { CalculatorHistory } from './components/CalculatorHistory';
+import { KeyboardShortcutsModal } from './components/KeyboardShortcutsModal';
+
+const HISTORY_STORAGE_KEY = 'calculator_history_v1';
+const MEMORY_STORAGE_KEY = 'calculator_memory_v1';
+const THEME_STORAGE_KEY = 'calculator_theme_v1';
+const SOUND_STORAGE_KEY = 'calculator_sound_v1';
 
 export default function App() {
-  const [tasks, setTasks] = useState<Task[]>(() => loadTasksFromStorage());
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  // Calculator Core State
+  const [expression, setExpression] = useState('');
+  const [currentInput, setCurrentInput] = useState('0');
+  const [isResult, setIsResult] = useState(false);
 
-  // Filters & Search
-  const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState<FilterStatus>('all');
-  const [categoryFilter, setCategoryFilter] = useState<Category | 'all'>('all');
-  const [sortBy, setSortBy] = useState<SortBy>('date_asc');
+  // History & Memory
+  const [history, setHistory] = useState<CalculationHistoryItem[]>(() => {
+    if (typeof window === 'undefined') return [];
+    try {
+      const saved = localStorage.getItem(HISTORY_STORAGE_KEY);
+      return saved ? JSON.parse(saved) : [];
+    } catch {
+      return [];
+    }
+  });
 
-  // App Settings
+  const [memory, setMemory] = useState<MemoryState>(() => {
+    if (typeof window === 'undefined') return { value: 0, hasValue: false };
+    try {
+      const saved = localStorage.getItem(MEMORY_STORAGE_KEY);
+      return saved ? JSON.parse(saved) : { value: 0, hasValue: false };
+    } catch {
+      return { value: 0, hasValue: false };
+    }
+  });
+
+  // UI state
+  const [showHistory, setShowHistory] = useState(false);
+  const [showShortcuts, setShowShortcuts] = useState(false);
+  const [showExtended, setShowExtended] = useState(false);
+
+  // Preferences
   const [darkMode, setDarkMode] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      const savedTheme = localStorage.getItem('android_todo_theme');
-      if (savedTheme) return savedTheme === 'dark';
+      const saved = localStorage.getItem(THEME_STORAGE_KEY);
+      if (saved) return saved === 'dark';
       return window.matchMedia('(prefers-color-scheme: dark)').matches;
     }
-    return false;
+    return true;
   });
 
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('android_todo_sound');
+      const saved = localStorage.getItem(SOUND_STORAGE_KEY);
       return saved !== 'false';
     }
     return true;
   });
 
-  // Sync dark mode class on document element
+  // Sync theme
   useEffect(() => {
     const root = document.documentElement;
     if (darkMode) {
       root.classList.add('dark');
-      localStorage.setItem('android_todo_theme', 'dark');
+      localStorage.setItem(THEME_STORAGE_KEY, 'dark');
     } else {
       root.classList.remove('dark');
-      localStorage.setItem('android_todo_theme', 'light');
+      localStorage.setItem(THEME_STORAGE_KEY, 'light');
     }
   }, [darkMode]);
 
-  // Sync sound setting
+  // Sync memory & history
   useEffect(() => {
-    localStorage.setItem('android_todo_sound', String(soundEnabled));
+    try {
+      localStorage.setItem(MEMORY_STORAGE_KEY, JSON.stringify(memory));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [memory]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(HISTORY_STORAGE_KEY, JSON.stringify(history));
+    } catch {
+      // Ignore storage errors
+    }
+  }, [history]);
+
+  // Sync sound
+  useEffect(() => {
+    localStorage.setItem(SOUND_STORAGE_KEY, String(soundEnabled));
   }, [soundEnabled]);
 
-  // Save tasks on change
-  useEffect(() => {
-    saveTasksToStorage(tasks);
-  }, [tasks]);
+  const triggerFeedback = useCallback(
+    (type: 'digit' | 'operator' | 'action' | 'equal' = 'digit') => {
+      if (soundEnabled) playKeySound(type);
+      triggerHaptic(type === 'equal' ? 22 : 12);
+    },
+    [soundEnabled]
+  );
 
-  // Action: Add or Edit Task
-  const handleSaveTask = (
-    taskData: Omit<Task, 'id' | 'createdAt' | 'completed' | 'completedAt'> & { id?: string }
-  ) => {
-    if (soundEnabled) playTapSound();
-    triggerHaptic(20);
+  // Digit Input
+  const handleDigit = useCallback(
+    (digit: string) => {
+      triggerFeedback('digit');
+      if (isResult) {
+        // Start fresh after calculating a result
+        setCurrentInput(digit);
+        setExpression('');
+        setIsResult(false);
+      } else {
+        if (currentInput === '0') {
+          setCurrentInput(digit);
+        } else if (currentInput === '-0') {
+          setCurrentInput(`-${digit}`);
+        } else if (currentInput.replace('-', '').length < 16) {
+          setCurrentInput((prev) => prev + digit);
+        }
+      }
+    },
+    [isResult, currentInput, triggerFeedback]
+  );
 
-    if (taskData.id) {
-      // Edit existing task
-      setTasks((prev) =>
-        prev.map((t) => (t.id === taskData.id ? { ...t, ...taskData } : t))
-      );
-    } else {
-      // Add new task
-      const newTask: Task = {
-        id: `task-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`,
-        title: taskData.title,
-        description: taskData.description,
-        completed: false,
-        createdAt: Date.now(),
-        dueDate: taskData.dueDate,
-        dueTime: taskData.dueTime,
-        priority: taskData.priority,
-        category: taskData.category,
-      };
-      setTasks((prev) => [newTask, ...prev]);
+  // Decimal Point
+  const handleDecimal = useCallback(() => {
+    triggerFeedback('digit');
+    if (isResult) {
+      setCurrentInput('0.');
+      setExpression('');
+      setIsResult(false);
+      return;
     }
-    setEditingTask(null);
-  };
 
-  // Action: Toggle Complete
-  const handleToggleTask = (id: string) => {
-    triggerHaptic(15);
+    if (!currentInput.includes('.')) {
+      setCurrentInput((prev) => `${prev}.`);
+    }
+  }, [isResult, currentInput, triggerFeedback]);
 
-    setTasks((prev) =>
-      prev.map((t) => {
-        if (t.id === id) {
-          const nextCompleted = !t.completed;
-          if (nextCompleted && soundEnabled) {
-            playSuccessSound();
-          } else if (soundEnabled) {
-            playTapSound();
-          }
-          return {
-            ...t,
-            completed: nextCompleted,
-            completedAt: nextCompleted ? Date.now() : undefined,
-          };
+  // Operator (+, -, *, /)
+  const handleOperator = useCallback(
+    (op: '+' | '-' | '*' | '/') => {
+      triggerFeedback('operator');
+      const opDisplay = op === '*' ? '×' : op === '/' ? '÷' : op;
+
+      if (isResult) {
+        // Chain calculation using the previous result
+        setExpression(`${currentInput} ${opDisplay}`);
+        setCurrentInput('0');
+        setIsResult(false);
+        return;
+      }
+
+      if (expression && currentInput === '0') {
+        // If user is just changing the operator at the end
+        const trimmed = expression.trim();
+        const lastChar = trimmed[trimmed.length - 1];
+        if (['+', '-', '×', '÷', '*', '/'].includes(lastChar)) {
+          setExpression(`${trimmed.slice(0, -1)} ${opDisplay}`);
+          return;
         }
-        return t;
-      })
-    );
-  };
+      }
 
-  // Action: Delete Task
-  const handleDeleteTask = (id: string) => {
-    if (soundEnabled) playTapSound();
-    triggerHaptic(25);
-    setTasks((prev) => prev.filter((t) => t.id !== id));
-  };
-
-  // Action: Open Modal for Edit
-  const handleEditClick = (task: Task) => {
-    setEditingTask(task);
-    setIsModalOpen(true);
-  };
-
-  // Action: Clear Completed Tasks
-  const handleClearCompleted = () => {
-    if (soundEnabled) playTapSound();
-    triggerHaptic(30);
-    setTasks((prev) => prev.filter((t) => !t.completed));
-  };
-
-  // Action: Mark All as Completed
-  const handleCompleteAll = () => {
-    if (soundEnabled) playSuccessSound();
-    triggerHaptic(30);
-    setTasks((prev) =>
-      prev.map((t) => ({
-        ...t,
-        completed: true,
-        completedAt: t.completedAt || Date.now(),
-      }))
-    );
-  };
-
-  // Counts for tabs
-  const counts = useMemo(() => {
-    const total = tasks.length;
-    const completed = tasks.filter((t) => t.completed).length;
-    const active = total - completed;
-    return { all: total, active, completed };
-  }, [tasks]);
-
-  // Filtered & Sorted Tasks
-  const filteredTasks = useMemo(() => {
-    return tasks
-      .filter((task) => {
-        // Status filter
-        if (statusFilter === 'active' && task.completed) return false;
-        if (statusFilter === 'completed' && !task.completed) return false;
-
-        // Category filter
-        if (categoryFilter !== 'all' && task.category !== categoryFilter) return false;
-
-        // Search filter
-        if (searchQuery.trim()) {
-          const query = searchQuery.toLowerCase();
-          const matchTitle = task.title.toLowerCase().includes(query);
-          const matchDesc = task.description?.toLowerCase().includes(query) ?? false;
-          if (!matchTitle && !matchDesc) return false;
+      // Add current number and operator to expression
+      setExpression((prev) => {
+        if (!prev) {
+          return `${currentInput} ${opDisplay}`;
         }
-
-        return true;
-      })
-      .sort((a, b) => {
-        // Keep active tasks first unless sorting alphabetically
-        if (a.completed !== b.completed) {
-          return a.completed ? 1 : -1;
-        }
-
-        if (sortBy === 'priority') {
-          const priorityScore: Record<string, number> = { high: 3, medium: 2, low: 1 };
-          return priorityScore[b.priority] - priorityScore[a.priority];
-        }
-
-        if (sortBy === 'date_asc') {
-          if (!a.dueDate) return 1;
-          if (!b.dueDate) return -1;
-          return a.dueDate.localeCompare(b.dueDate);
-        }
-
-        if (sortBy === 'date_desc') {
-          return b.createdAt - a.createdAt;
-        }
-
-        if (sortBy === 'alphabetical') {
-          return a.title.localeCompare(b.title);
-        }
-
-        return 0;
+        return `${prev} ${currentInput} ${opDisplay}`;
       });
-  }, [tasks, statusFilter, categoryFilter, searchQuery, sortBy]);
+      setCurrentInput('0');
+    },
+    [isResult, currentInput, expression, triggerFeedback]
+  );
+
+  // Equals (=)
+  const handleEqual = useCallback(() => {
+    triggerFeedback('equal');
+    if (!expression && !isResult) {
+      return;
+    }
+
+    let fullExpr = expression ? `${expression} ${currentInput}` : currentInput;
+    // Normalize operators for evaluator
+    fullExpr = fullExpr.replace(/×/g, '*').replace(/÷/g, '/').replace(/−/g, '-');
+
+    const evalRes = evaluateExpression(fullExpr);
+
+    if (evalRes.error) {
+      setCurrentInput('Erreur');
+      setIsResult(true);
+      return;
+    }
+
+    const resultNum = evalRes.result ?? 0;
+    const resultStr = String(resultNum);
+
+    // Save to history if it was an actual equation
+    if (expression) {
+      const historyItem: CalculationHistoryItem = {
+        id: `calc-${Date.now()}-${Math.random().toString(36).substr(2, 4)}`,
+        expression: fullExpr,
+        result: resultStr,
+        timestamp: Date.now(),
+      };
+      setHistory((prev) => [historyItem, ...prev.slice(0, 49)]);
+    }
+
+    setExpression(`${fullExpr} =`);
+    setCurrentInput(resultStr);
+    setIsResult(true);
+  }, [expression, isResult, currentInput, triggerFeedback]);
+
+  // Clear All (AC)
+  const handleClear = useCallback(() => {
+    triggerFeedback('action');
+    setExpression('');
+    setCurrentInput('0');
+    setIsResult(false);
+  }, [triggerFeedback]);
+
+  // Backspace (⌫)
+  const handleBackspace = useCallback(() => {
+    triggerFeedback('action');
+    if (isResult) {
+      handleClear();
+      return;
+    }
+
+    if (currentInput.length > 1) {
+      if (currentInput.length === 2 && currentInput.startsWith('-')) {
+        setCurrentInput('0');
+      } else {
+        setCurrentInput((prev) => prev.slice(0, -1));
+      }
+    } else {
+      setCurrentInput('0');
+    }
+  }, [isResult, currentInput, handleClear, triggerFeedback]);
+
+  // Toggle Sign (±)
+  const handleToggleSign = useCallback(() => {
+    triggerFeedback('action');
+    if (currentInput === '0' || currentInput === 'Erreur') return;
+    setCurrentInput((prev) => (prev.startsWith('-') ? prev.slice(1) : `-${prev}`));
+  }, [currentInput, triggerFeedback]);
+
+  // Percentage (%)
+  const handlePercentage = useCallback(() => {
+    triggerFeedback('action');
+    const val = parseFloat(currentInput);
+    if (isNaN(val)) return;
+
+    if (expression) {
+      // Find the base number from expression if possible
+      const parts = expression.trim().split(' ');
+      const baseVal = parseFloat(parts[0]);
+      if (!isNaN(baseVal)) {
+        const percentVal = cleanFloat((baseVal * val) / 100);
+        setCurrentInput(String(percentVal));
+        return;
+      }
+    }
+
+    const simplePercent = cleanFloat(val / 100);
+    setCurrentInput(String(simplePercent));
+  }, [currentInput, expression, triggerFeedback]);
+
+  // Math Unary Operations
+  const handleSquare = useCallback(() => {
+    triggerFeedback('action');
+    const val = parseFloat(currentInput);
+    if (isNaN(val)) return;
+    const res = cleanFloat(val * val);
+    setExpression(`sqr(${currentInput})`);
+    setCurrentInput(String(res));
+    setIsResult(true);
+  }, [currentInput, triggerFeedback]);
+
+  const handleSquareRoot = useCallback(() => {
+    triggerFeedback('action');
+    const val = parseFloat(currentInput);
+    if (isNaN(val) || val < 0) {
+      setCurrentInput('Erreur');
+      setIsResult(true);
+      return;
+    }
+    const res = cleanFloat(Math.sqrt(val));
+    setExpression(`√(${currentInput})`);
+    setCurrentInput(String(res));
+    setIsResult(true);
+  }, [currentInput, triggerFeedback]);
+
+  const handleReciprocal = useCallback(() => {
+    triggerFeedback('action');
+    const val = parseFloat(currentInput);
+    if (isNaN(val) || val === 0) {
+      setCurrentInput('Erreur');
+      setIsResult(true);
+      return;
+    }
+    const res = cleanFloat(1 / val);
+    setExpression(`1/(${currentInput})`);
+    setCurrentInput(String(res));
+    setIsResult(true);
+  }, [currentInput, triggerFeedback]);
+
+  // Parentheses
+  const handleParenthesis = useCallback(
+    (p: '(' | ')') => {
+      triggerFeedback('operator');
+      if (p === '(') {
+        if (isResult) {
+          setExpression('(');
+          setCurrentInput('0');
+          setIsResult(false);
+        } else if (currentInput === '0') {
+          setExpression((prev) => `${prev} (`.trim());
+        } else {
+          setExpression((prev) => `${prev} ${currentInput} × (`.trim());
+          setCurrentInput('0');
+        }
+      } else {
+        // ')'
+        setExpression((prev) => `${prev} ${currentInput} )`.trim());
+        setCurrentInput('0');
+      }
+    },
+    [isResult, currentInput, triggerFeedback]
+  );
+
+  // Memory Actions
+  const handleMemoryAction = useCallback(
+    (action: 'MC' | 'MR' | 'M+' | 'M-' | 'MS') => {
+      triggerFeedback('action');
+      const val = parseFloat(currentInput) || 0;
+
+      switch (action) {
+        case 'MC':
+          setMemory({ value: 0, hasValue: false });
+          break;
+        case 'MR':
+          if (memory.hasValue) {
+            setCurrentInput(String(memory.value));
+            setIsResult(true);
+          }
+          break;
+        case 'M+':
+          setMemory((prev) => ({
+            value: cleanFloat((prev.hasValue ? prev.value : 0) + val),
+            hasValue: true,
+          }));
+          break;
+        case 'M-':
+          setMemory((prev) => ({
+            value: cleanFloat((prev.hasValue ? prev.value : 0) - val),
+            hasValue: true,
+          }));
+          break;
+        case 'MS':
+          setMemory({
+            value: cleanFloat(val),
+            hasValue: true,
+          });
+          break;
+      }
+    },
+    [currentInput, memory, triggerFeedback]
+  );
+
+  // Select History Item
+  const handleSelectHistory = useCallback((item: CalculationHistoryItem) => {
+    setCurrentInput(item.result);
+    setExpression(item.expression);
+    setIsResult(true);
+    setShowHistory(false);
+  }, []);
+
+  // Keyboard Event Listener
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Don't intercept if modifier keys like Ctrl/Meta (for copy, reload, etc.)
+      if (e.ctrlKey || e.metaKey || e.altKey) return;
+
+      if (e.key >= '0' && e.key <= '9') {
+        e.preventDefault();
+        handleDigit(e.key);
+      } else if (e.key === '.' || e.key === ',') {
+        e.preventDefault();
+        handleDecimal();
+      } else if (e.key === '+') {
+        e.preventDefault();
+        handleOperator('+');
+      } else if (e.key === '-') {
+        e.preventDefault();
+        handleOperator('-');
+      } else if (e.key === '*') {
+        e.preventDefault();
+        handleOperator('*');
+      } else if (e.key === '/') {
+        e.preventDefault();
+        handleOperator('/');
+      } else if (e.key === 'Enter' || e.key === '=') {
+        e.preventDefault();
+        handleEqual();
+      } else if (e.key === 'Backspace') {
+        e.preventDefault();
+        handleBackspace();
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        handleClear();
+      } else if (e.key === '%') {
+        e.preventDefault();
+        handlePercentage();
+      } else if (e.key === '(' || e.key === ')') {
+        e.preventDefault();
+        handleParenthesis(e.key as '(' | ')');
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [
+    handleDigit,
+    handleDecimal,
+    handleOperator,
+    handleEqual,
+    handleBackspace,
+    handleClear,
+    handlePercentage,
+    handleParenthesis,
+  ]);
 
   return (
-    <AndroidFrame
-      darkMode={darkMode}
-      onToggleDarkMode={() => setDarkMode(!darkMode)}
-      soundEnabled={soundEnabled}
-      onToggleSound={() => setSoundEnabled(!soundEnabled)}
-      onOpenNewTaskModal={() => {
-        setEditingTask(null);
-        setIsModalOpen(true);
-      }}
-    >
-      <div className="flex-1 flex flex-col p-4 sm:p-5 relative min-h-full">
-        {/* Android Material App Bar Header */}
-        <div className="flex items-center justify-between pb-3">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-3 sm:p-6 select-none transition-colors duration-200">
+      {/* Container Wrapper */}
+      <div className="w-full max-w-[420px] bg-white dark:bg-slate-900/95 rounded-[36px] sm:rounded-[40px] p-5 sm:p-6 shadow-2xl border border-slate-200 dark:border-slate-800/80 relative overflow-hidden backdrop-blur-md">
+        {/* Header bar: Title & Utilities */}
+        <header className="flex items-center justify-between pb-3.5 mb-1 text-slate-700 dark:text-slate-300">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-2xl bg-indigo-600 dark:bg-indigo-500 text-white flex items-center justify-center shadow-md shadow-indigo-500/20">
-              <ListTodo className="w-5 h-5" />
+            <div className="w-8 h-8 rounded-xl bg-indigo-600 dark:bg-indigo-500 text-white flex items-center justify-center shadow-md shadow-indigo-600/20">
+              <CalcIcon className="w-4 h-4" />
             </div>
             <div>
-              <h1 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-1.5">
-                <span>To-Do List</span>
-                <span className="text-xs px-2 py-0.5 rounded-full bg-indigo-100 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 font-semibold border border-indigo-200 dark:border-indigo-800">
-                  Android
-                </span>
+              <h1 className="text-base font-bold tracking-tight text-slate-900 dark:text-white flex items-center gap-1.5">
+                <span>Calculatrice</span>
               </h1>
-              <p className="text-xs text-slate-500 dark:text-slate-400">
-                {counts.active} tâche{counts.active > 1 ? 's' : ''} en attente
-              </p>
             </div>
           </div>
 
-          <button
-            id="btn-header-add-task"
-            type="button"
-            onClick={() => {
-              setEditingTask(null);
-              setIsModalOpen(true);
-            }}
-            className="flex sm:hidden p-2 rounded-xl bg-indigo-600 text-white shadow-xs"
-            title="Ajouter une tâche"
-          >
-            <Plus className="w-5 h-5" />
-          </button>
-        </div>
+          <div className="flex items-center gap-1">
+            {/* Keyboard shortcuts helper */}
+            <button
+              id="btn-shortcuts"
+              type="button"
+              onClick={() => setShowShortcuts(true)}
+              title="Raccourcis clavier"
+              className="p-2 rounded-xl text-slate-400 hover:text-indigo-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+            >
+              <Keyboard className="w-4 h-4" />
+            </button>
 
-        {/* Progress Stats Card */}
+            {/* Sound toggle */}
+            <button
+              id="btn-sound-toggle"
+              type="button"
+              onClick={() => setSoundEnabled(!soundEnabled)}
+              title={soundEnabled ? 'Désactiver le son' : 'Activer le son'}
+              className="p-2 rounded-xl text-slate-400 hover:text-indigo-600 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+            >
+              {soundEnabled ? (
+                <Volume2 className="w-4 h-4 text-indigo-500 dark:text-indigo-400" />
+              ) : (
+                <VolumeX className="w-4 h-4" />
+              )}
+            </button>
+
+            {/* Dark / Light toggle */}
+            <button
+              id="btn-theme-toggle"
+              type="button"
+              onClick={() => setDarkMode(!darkMode)}
+              title={darkMode ? 'Passer en mode clair' : 'Passer en mode sombre'}
+              className="p-2 rounded-xl text-slate-400 hover:text-amber-500 hover:bg-slate-100 dark:hover:bg-slate-800 transition"
+            >
+              {darkMode ? (
+                <Sun className="w-4 h-4 text-amber-400" />
+              ) : (
+                <Moon className="w-4 h-4 text-indigo-600" />
+              )}
+            </button>
+          </div>
+        </header>
+
+        {/* Display screen */}
         <div className="mb-4">
-          <TaskStats
-            total={counts.all}
-            completed={counts.completed}
-            onClearCompleted={handleClearCompleted}
-            onCompleteAll={handleCompleteAll}
+          <CalculatorDisplay
+            expression={expression}
+            currentInput={currentInput}
+            hasMemory={memory.hasValue}
+            onToggleHistory={() => setShowHistory(!showHistory)}
+            showHistory={showHistory}
+            historyCount={history.length}
           />
         </div>
 
-        {/* Filters & Search */}
-        <div className="mb-4">
-          <TaskFilters
-            searchQuery={searchQuery}
-            onSearchChange={setSearchQuery}
-            statusFilter={statusFilter}
-            onStatusChange={setStatusFilter}
-            categoryFilter={categoryFilter}
-            onCategoryChange={setCategoryFilter}
-            sortBy={sortBy}
-            onSortChange={setSortBy}
-            counts={counts}
-          />
-        </div>
+        {/* Keypad */}
+        <CalculatorKeypad
+          onDigit={handleDigit}
+          onDecimal={handleDecimal}
+          onOperator={handleOperator}
+          onEqual={handleEqual}
+          onClear={handleClear}
+          onBackspace={handleBackspace}
+          onToggleSign={handleToggleSign}
+          onPercentage={handlePercentage}
+          onSquare={handleSquare}
+          onSquareRoot={handleSquareRoot}
+          onReciprocal={handleReciprocal}
+          onParenthesis={handleParenthesis}
+          onMemoryAction={handleMemoryAction}
+          memory={memory}
+          showExtended={showExtended}
+          onToggleExtended={() => setShowExtended(!showExtended)}
+        />
 
-        {/* Task List */}
-        <div className="flex-1 space-y-2.5 pb-20">
-          <AnimatePresence mode="popLayout">
-            {filteredTasks.length > 0 ? (
-              filteredTasks.map((task) => (
-                <TaskItem
-                  key={task.id}
-                  task={task}
-                  onToggle={handleToggleTask}
-                  onEdit={handleEditClick}
-                  onDelete={handleDeleteTask}
-                />
-              ))
-            ) : (
-              <motion.div
-                initial={{ opacity: 0, scale: 0.95 }}
-                animate={{ opacity: 1, scale: 1 }}
-                className="py-12 px-4 text-center rounded-2xl bg-slate-50/60 dark:bg-slate-800/30 border border-dashed border-slate-200 dark:border-slate-800 flex flex-col items-center justify-center"
-              >
-                {searchQuery || categoryFilter !== 'all' || statusFilter !== 'all' ? (
-                  <>
-                    <FilterX className="w-10 h-10 text-slate-400 mb-2" />
-                    <p className="text-sm font-semibold text-slate-700 dark:text-slate-300">
-                      Aucune tâche ne correspond à vos filtres
-                    </p>
-                    <p className="text-xs text-slate-500 mt-1 max-w-xs">
-                      Essayez de réinitialiser la recherche ou de changer les catégories.
-                    </p>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSearchQuery('');
-                        setStatusFilter('all');
-                        setCategoryFilter('all');
-                      }}
-                      className="mt-3 px-3 py-1.5 rounded-xl bg-slate-200 dark:bg-slate-700 text-xs font-medium text-slate-800 dark:text-slate-200 hover:bg-slate-300 transition"
-                    >
-                      Effacer les filtres
-                    </button>
-                  </>
-                ) : counts.all > 0 && counts.completed === counts.all ? (
-                  <>
-                    <div className="w-12 h-12 rounded-full bg-emerald-100 dark:bg-emerald-950 flex items-center justify-center text-emerald-600 dark:text-emerald-400 mb-3">
-                      <Sparkles className="w-6 h-6" />
-                    </div>
-                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
-                      Toutes les tâches sont terminées !
-                    </p>
-                    <p className="text-xs text-slate-500 mt-1">
-                      Profitez de votre journée ou ajoutez de nouveaux objectifs.
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <div className="w-12 h-12 rounded-full bg-indigo-50 dark:bg-indigo-950/60 flex items-center justify-center text-indigo-600 dark:text-indigo-400 mb-3">
-                      <CheckCircle className="w-6 h-6" />
-                    </div>
-                    <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
-                      Aucune tâche pour le moment
-                    </p>
-                    <p className="text-xs text-slate-500 mt-1">
-                      Commencez en appuyant sur le bouton d'ajout ci-dessous.
-                    </p>
-                    <button
-                      id="btn-empty-add-task"
-                      type="button"
-                      onClick={() => {
-                        setEditingTask(null);
-                        setIsModalOpen(true);
-                      }}
-                      className="mt-3.5 px-4 py-2 rounded-xl bg-indigo-600 text-white text-xs font-medium shadow-sm hover:bg-indigo-700 transition flex items-center gap-1.5"
-                    >
-                      <Plus className="w-4 h-4" />
-                      <span>Ajouter une première tâche</span>
-                    </button>
-                  </>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-
-        {/* Material 3 Floating Action Button (FAB) */}
-        <motion.button
-          id="btn-fab-add-task"
-          type="button"
-          onClick={() => {
-            setEditingTask(null);
-            setIsModalOpen(true);
-          }}
-          whileHover={{ scale: 1.05 }}
-          whileTap={{ scale: 0.95 }}
-          aria-label="Ajouter une nouvelle tâche"
-          className="fixed sm:absolute bottom-6 right-6 z-40 w-14 h-14 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white flex items-center justify-center shadow-lg shadow-indigo-600/40 border border-indigo-400/20 transition-all focus:outline-none focus:ring-4 focus:ring-indigo-500/30"
-        >
-          <Plus className="w-7 h-7 stroke-[2.5]" />
-        </motion.button>
+        {/* Slide-over History Tape */}
+        <CalculatorHistory
+          isOpen={showHistory}
+          onClose={() => setShowHistory(false)}
+          history={history}
+          onSelectHistory={handleSelectHistory}
+          onClearHistory={() => setHistory([])}
+        />
       </div>
 
-      {/* Task Creation & Editing Bottom Sheet Modal */}
-      <TaskModal
-        isOpen={isModalOpen}
-        onClose={() => {
-          setIsModalOpen(false);
-          setEditingTask(null);
-        }}
-        onSave={handleSaveTask}
-        editingTask={editingTask}
+      {/* Keyboard Shortcuts Dialog */}
+      <KeyboardShortcutsModal
+        isOpen={showShortcuts}
+        onClose={() => setShowShortcuts(false)}
       />
-    </AndroidFrame>
+
+      {/* Footer subtle hint */}
+      <footer className="mt-4 text-center text-xs text-slate-400 dark:text-slate-500 flex items-center gap-2">
+        <span>Saisie tactile & clavier supportée</span>
+        <span>•</span>
+        <span>Précision arithmétique</span>
+      </footer>
+    </div>
   );
 }

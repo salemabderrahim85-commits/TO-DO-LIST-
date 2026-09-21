@@ -1,6 +1,6 @@
 {
   "name": "To-Do List Android",
-  "description": "Application Android To-Do List pour ajouter, modifier, supprimer et terminer des tâches avec interface Material Design 3.",
+  "description": "Calculatrice moderne et fluide pour calculs simples avec historique, fonctions mémoire et support clavier.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
